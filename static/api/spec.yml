@@ -1652,6 +1652,172 @@ paths:
             application/json:
               schema:
                 example: { "code": 500, "error": "failed to get message history", "success": false }
+  /labels:
+    get:
+      tags:
+        - Chat
+      summary: List labels for the connected account
+      description: |
+        Returns every WhatsApp label cached for the connected device. The handler first
+        runs an **incremental** app-state sync (non-destructive) to surface fresh
+        LabelEdit mutations from the server; if the sync fails the local cache is
+        served anyway. Labels are fed by `LabelEdit` events received during the
+        initial full sync (with `EmitAppStateEventsOnFullSync = true`) and from any
+        successful auto-create performed by `POST /labels/chat`.
+      security:
+        - ApiKeyAuth: []
+      responses:
+        200:
+          description: Labels retrieved successfully
+          content:
+            application/json:
+              schema:
+                example:
+                  code: 200
+                  success: true
+                  data:
+                    labels:
+                      - id: "1"
+                        name: "New customer"
+                        color: 0
+                        deleted: false
+                        timestamp: "2026-04-27T20:00:00Z"
+                      - id: "2"
+                        name: "VIP"
+                        color: 5
+                        deleted: false
+                        timestamp: "2026-04-27T20:01:11Z"
+        500:
+          description: No active session for the user
+          content:
+            application/json:
+              schema:
+                example: { "code": 500, "error": "no session", "success": false }
+  /labels/chat:
+    post:
+      tags:
+        - Chat
+      summary: Associate a label to a chat (auto-create by name supported)
+      description: |
+        Associates a label to the chat identified by `Phone`. Provide **exactly one**
+        of `LabelID` or `LabelName`:
+
+        * `LabelID` – associates the existing label by its numeric ID (1..20).
+        * `LabelName` – associates by name. If no label with that name (compared
+          case-insensitively after trimming) exists, one is created via the
+          underlying `BuildLabelEdit` mutation **before** being associated.
+          Auto-creation is idempotent: concurrent calls of the same client with
+          the same name reuse the same label thanks to a per-user creation lock
+          and an optimistic cache insert. `Color` is honoured only when the label
+          is created.
+
+        WhatsApp Business limits accounts to 20 labels. When the limit is reached
+        and `LabelName` does not match an existing label, the endpoint responds
+        with `409 Conflict` and **does not** delete or repurpose anything.
+
+        The label itself is never removed by this endpoint – only the
+        chat↔label association is created.
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: '#/definitions/LabelChatByID'
+                - $ref: '#/definitions/LabelChatByName'
+      responses:
+        200:
+          description: Response
+          content:
+            application/json:
+              schema:
+                example:
+                  code: 200
+                  success: true
+                  data:
+                    Details: "Label associated to chat"
+                    Phone: "5491155553934"
+                    LabelID: "3"
+                    LabelCreated: true
+        400:
+          description: Missing Phone, or both/neither LabelID/LabelName provided, or invalid Phone JID
+          content:
+            application/json:
+              schema:
+                example: { "code": 400, "error": "provide exactly one of LabelID or LabelName", "success": false }
+        409:
+          description: WhatsApp Business label limit reached (20). The existing labels are left untouched.
+          content:
+            application/json:
+              schema:
+                example: { "code": 409, "error": "WhatsApp Business label limit reached (20)", "success": false }
+        500:
+          description: No active session, or failure talking to WhatsApp
+          content:
+            application/json:
+              schema:
+                example: { "code": 500, "error": "failed to associate label: ...", "success": false }
+    delete:
+      tags:
+        - Chat
+      summary: Remove a label from a chat
+      description: |
+        Removes a single chat↔label association. **The label itself is never
+        deleted**, only the relationship between the chat and the label.
+
+        Accepts either a JSON body matching `LabelChatByID` **or** the equivalent
+        `phone`/`labelId` query-string parameters as a fallback for HTTP
+        intermediaries that strip DELETE bodies.
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: phone
+          in: query
+          required: false
+          description: Chat phone (alternative to JSON body Phone). E.164 without leading "+".
+          schema:
+            type: string
+            example: "5491155553934"
+        - name: labelId
+          in: query
+          required: false
+          description: Label ID (alternative to JSON body LabelID).
+          schema:
+            type: string
+            example: "1"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/definitions/LabelChatByID'
+      responses:
+        200:
+          description: Response
+          content:
+            application/json:
+              schema:
+                example:
+                  code: 200
+                  success: true
+                  data:
+                    Details: "Label removed from chat"
+                    Phone: "5491155553934"
+                    LabelID: "1"
+        400:
+          description: Missing Phone or LabelID, or invalid Phone JID
+          content:
+            application/json:
+              schema:
+                example: { "code": 400, "error": "missing Phone or LabelID", "success": false }
+        500:
+          description: No active session, or failure talking to WhatsApp
+          content:
+            application/json:
+              schema:
+                example: { "code": 500, "error": "failed to remove label: ...", "success": false }
   /status/set/text:
     post:
       tags:
@@ -2128,6 +2294,42 @@ definitions:
     properties:
       extendedTextMessage:
         $ref: "#/definitions/QuotedMessageExtendedText"
+  LabelChatByID:
+    type: object
+    description: "Associate or dissociate a chat with an existing label by its ID."
+    required:
+      - Phone
+      - LabelID
+    properties:
+      Phone:
+        type: string
+        example: "5491155553934"
+        description: "Chat phone in E.164 without leading +."
+      LabelID:
+        type: string
+        example: "1"
+        description: "Existing label ID (1..20)."
+  LabelChatByName:
+    type: object
+    description: "Associate a chat with a label by name. The label is created if it does not yet exist (case-insensitive, trimmed match). Idempotent – repeated calls with the same name reuse the existing label."
+    required:
+      - Phone
+      - LabelName
+    properties:
+      Phone:
+        type: string
+        example: "5491155553934"
+        description: "Chat phone in E.164 without leading +."
+      LabelName:
+        type: string
+        example: "Cliente VIP"
+        description: "Label name. Compared case-insensitively after trimming whitespace."
+      Color:
+        type: integer
+        minimum: 0
+        maximum: 19
+        example: 0
+        description: "Optional WhatsApp label color (0-19). Honoured only when the label is created."
   User:
     type: object
     properties:

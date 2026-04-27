@@ -122,6 +122,10 @@ func (s *server) routes() {
 	s.router.Handle("/chat/request-unavailable-message", c.Then(s.RequestUnavailableMessage())).Methods("POST")
 	s.router.Handle("/chat/archive", c.Then(s.ArchiveChat())).Methods("POST")
 
+	s.router.Handle("/labels", c.Then(s.ListLabels())).Methods("GET")
+	s.router.Handle("/labels/chat", c.Then(s.AddLabelToChat())).Methods("POST")
+	s.router.Handle("/labels/chat", c.Then(s.RemoveLabelFromChat())).Methods("DELETE")
+
 	s.router.Handle("/status/set/text", c.Then(s.SetStatusMessage())).Methods("POST")
 
 	s.router.Handle("/call/reject", c.Then(s.RejectCall())).Methods("POST")

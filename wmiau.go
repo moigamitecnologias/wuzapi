@@ -437,6 +437,11 @@ func (s *server) startClient(userID string, textjid string, token string, subscr
 		client = whatsmeow.NewClient(deviceStore, nil)
 	}
 
+	// Required so the initial app-state full sync emits LabelEdit/LabelAssociation* events
+	// that feed labelCache. Audited: no webhook is triggered by app-state events in
+	// myEventHandler (they fall through the default with a single Warn log).
+	client.EmitAppStateEventsOnFullSync = true
+
 	// Now we can use the client with the manager
 	clientManager.SetWhatsmeowClient(userID, client)
 
@@ -1438,6 +1443,7 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 		postmap["type"] = "LoggedOut"
 		dowebhook = 1
 		log.Info().Str("reason", evt.Reason.String()).Msg("Logged out")
+		labelCacheClear(mycli.userID)
 		defer func() {
 			// Use a non-blocking send to prevent a deadlock if the receiver has already terminated.
 			select {
@@ -1575,6 +1581,12 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 		postmap["type"] = "FBMessage"
 		dowebhook = 1
 		log.Info().Str("info", evt.Info.SourceString()).Msg("Facebook message received")
+	case *events.LabelEdit:
+		labelCacheUpsertFromEdit(mycli.userID, evt)
+	case *events.LabelAssociationChat:
+		// Silenced from default Warn; no cache for chat associations yet.
+	case *events.LabelAssociationMessage:
+		// Silenced from default Warn; no cache for message associations yet.
 	default:
 		log.Warn().Str("event", fmt.Sprintf("%+v", evt)).Msg("Unhandled event")
 	}

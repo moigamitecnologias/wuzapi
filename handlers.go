@@ -7269,3 +7269,210 @@ func (s *server) publishSentMessageEvent(token, userID, txtid string, recipient 
 	// Publish directly to RabbitMQ (bypassing subscription check for sent messages)
 	go sendToGlobalRabbit(jsonData, token, userID)
 }
+
+// ListLabels returns every WhatsApp label cached for the connected session.
+// It first attempts an incremental app-state sync (non-destructive: fullSync=false)
+// to surface any new LabelEdit mutations from the server, then serves the cache.
+// FetchAppState failures are logged but do not fail the request – the cache is
+// authoritative as far as the HTTP layer is concerned.
+func (s *server) ListLabels() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		txtid := r.Context().Value("userinfo").(Values).Get("Id")
+
+		if clientManager.GetWhatsmeowClient(txtid) == nil {
+			s.Respond(w, r, http.StatusInternalServerError, errors.New("no session"))
+			return
+		}
+		client := clientManager.GetWhatsmeowClient(txtid)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		if err := client.FetchAppState(ctx, appstate.WAPatchRegular, false, false); err != nil {
+			log.Warn().Err(err).Str("userid", txtid).Msg("FetchAppState regular failed; serving cache")
+		}
+
+		labels := labelCacheGetAll(txtid)
+		responseJson, err := json.Marshal(map[string]interface{}{"labels": labels})
+		if err != nil {
+			s.Respond(w, r, http.StatusInternalServerError, err)
+			return
+		}
+		s.Respond(w, r, http.StatusOK, string(responseJson))
+	}
+}
+
+// AddLabelToChat associates a WhatsApp label with a chat. Two modes:
+//
+//   - {Phone, LabelID}        : associates the existing label by ID (idempotent).
+//   - {Phone, LabelName, ...} : associates by name. If no label with that name
+//     (case-insensitive, trimmed) exists, one is created via BuildLabelEdit
+//     before the association is sent. Idempotent across concurrent calls of
+//     the same client thanks to the per-user creation lock + optimistic cache
+//     insert. Color is honoured only on first creation.
+//
+// LabelID and LabelName are mutually exclusive. The label itself is never
+// deleted by this handler; only label↔chat associations are mutated.
+func (s *server) AddLabelToChat() http.HandlerFunc {
+	type labelChatStruct struct {
+		Phone     string
+		LabelID   string
+		LabelName string
+		Color     int32
+	}
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		txtid := r.Context().Value("userinfo").(Values).Get("Id")
+
+		if clientManager.GetWhatsmeowClient(txtid) == nil {
+			s.Respond(w, r, http.StatusInternalServerError, errors.New("no session"))
+			return
+		}
+		client := clientManager.GetWhatsmeowClient(txtid)
+
+		var t labelChatStruct
+		if err := json.NewDecoder(r.Body).Decode(&t); err != nil {
+			s.Respond(w, r, http.StatusBadRequest, errors.New("could not decode Payload"))
+			return
+		}
+		if t.Phone == "" {
+			s.Respond(w, r, http.StatusBadRequest, errors.New("missing Phone in Payload"))
+			return
+		}
+		hasID := t.LabelID != ""
+		hasName := strings.TrimSpace(t.LabelName) != ""
+		if hasID == hasName {
+			s.Respond(w, r, http.StatusBadRequest, errors.New("provide exactly one of LabelID or LabelName"))
+			return
+		}
+
+		chatJID, ok := parseJID(t.Phone)
+		if !ok {
+			s.Respond(w, r, http.StatusBadRequest, errors.New("could not parse Phone"))
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		labelID := t.LabelID
+		labelCreated := false
+
+		if hasName {
+			// Per-user lock guarantees that two concurrent requests with the
+			// same LabelName will not race into creating duplicate labels.
+			mu := labelCreationLockFor(txtid)
+			mu.Lock()
+			defer mu.Unlock()
+
+			// Best-effort: pull any new LabelEdit mutations the server may have
+			// (e.g. created by another paired device) before deciding.
+			if err := client.FetchAppState(ctx, appstate.WAPatchRegular, false, false); err != nil {
+				log.Warn().Err(err).Str("userid", txtid).Msg("FetchAppState before label create failed; using local cache")
+			}
+
+			normalized := normalizeLabelName(t.LabelName)
+			if existing := labelCacheFindByNormalizedName(txtid, normalized); existing != nil {
+				labelID = existing.ID
+			} else {
+				newID, err := labelCacheNextID(txtid)
+				if err != nil {
+					s.Respond(w, r, http.StatusConflict, errors.New("WhatsApp Business label limit reached (20)"))
+					return
+				}
+				cleanName := strings.TrimSpace(t.LabelName)
+				if err := client.SendAppState(ctx, appstate.BuildLabelEdit(newID, cleanName, t.Color, false)); err != nil {
+					s.Respond(w, r, http.StatusInternalServerError, fmt.Errorf("failed to create label: %w", err))
+					return
+				}
+				labelCacheOptimisticInsert(txtid, labelInfo{
+					ID:        newID,
+					Name:      cleanName,
+					Color:     t.Color,
+					Deleted:   false,
+					Timestamp: time.Now(),
+				})
+				labelID = newID
+				labelCreated = true
+			}
+		}
+
+		if err := client.SendAppState(ctx, appstate.BuildLabelChat(chatJID, labelID, true)); err != nil {
+			s.Respond(w, r, http.StatusInternalServerError, fmt.Errorf("failed to associate label: %w", err))
+			return
+		}
+
+		responseJson, err := json.Marshal(map[string]interface{}{
+			"Details":      "Label associated to chat",
+			"Phone":        t.Phone,
+			"LabelID":      labelID,
+			"LabelCreated": labelCreated,
+		})
+		if err != nil {
+			s.Respond(w, r, http.StatusInternalServerError, err)
+			return
+		}
+		s.Respond(w, r, http.StatusOK, string(responseJson))
+	}
+}
+
+// RemoveLabelFromChat removes the (chat, label) association. The label itself
+// is never deleted. Accepts either a JSON body matching {Phone, LabelID} or
+// query string params (?phone=&labelId=) – the latter as defence against
+// HTTP intermediaries that strip DELETE bodies.
+func (s *server) RemoveLabelFromChat() http.HandlerFunc {
+	type labelChatStruct struct {
+		Phone   string
+		LabelID string
+	}
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		txtid := r.Context().Value("userinfo").(Values).Get("Id")
+
+		if clientManager.GetWhatsmeowClient(txtid) == nil {
+			s.Respond(w, r, http.StatusInternalServerError, errors.New("no session"))
+			return
+		}
+		client := clientManager.GetWhatsmeowClient(txtid)
+
+		var t labelChatStruct
+		if r.Body != nil {
+			_ = json.NewDecoder(r.Body).Decode(&t) // tolerate empty/invalid body
+		}
+		if t.Phone == "" {
+			t.Phone = r.URL.Query().Get("phone")
+		}
+		if t.LabelID == "" {
+			t.LabelID = r.URL.Query().Get("labelId")
+		}
+		if t.Phone == "" || t.LabelID == "" {
+			s.Respond(w, r, http.StatusBadRequest, errors.New("missing Phone or LabelID"))
+			return
+		}
+
+		chatJID, ok := parseJID(t.Phone)
+		if !ok {
+			s.Respond(w, r, http.StatusBadRequest, errors.New("could not parse Phone"))
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		if err := client.SendAppState(ctx, appstate.BuildLabelChat(chatJID, t.LabelID, false)); err != nil {
+			s.Respond(w, r, http.StatusInternalServerError, fmt.Errorf("failed to remove label: %w", err))
+			return
+		}
+
+		responseJson, err := json.Marshal(map[string]interface{}{
+			"Details": "Label removed from chat",
+			"Phone":   t.Phone,
+			"LabelID": t.LabelID,
+		})
+		if err != nil {
+			s.Respond(w, r, http.StatusInternalServerError, err)
+			return
+		}
+		s.Respond(w, r, http.StatusOK, string(responseJson))
+	}
+}
