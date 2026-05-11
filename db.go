@@ -135,9 +135,19 @@ func (s *server) saveMessageToHistory(userID, chatJID, senderJID, messageID, mes
 }
 
 func (s *server) trimMessageHistory(userID, chatJID string, limit int) error {
-	var queryHistory, querySecrets string
+	// Defense in depth: a non-positive limit would translate to OFFSET <= 0 and
+	// cause the inner SELECT to match every row, wiping the whole chat history
+	// for this (user_id, chat_jid). All production callers already guard with
+	// `historyLimit > 0`, but we refuse here too so a future caller cannot
+	// accidentally truncate the table.
+	if limit <= 0 {
+		return nil
+	}
 
-	if s.db.DriverName() == "postgres" {
+	isPostgres := s.db.DriverName() == "postgres"
+
+	var queryHistory, querySecrets string
+	if isPostgres {
 		queryHistory = `
             DELETE FROM message_history
             WHERE id IN (
@@ -155,7 +165,7 @@ func (s *server) trimMessageHistory(userID, chatJID string, limit int) error {
                 ORDER BY timestamp DESC
                 OFFSET $3
             )`
-	} else { // sqlite
+	} else { // sqlite (modernc.org/sqlite registers as "sqlite")
 		queryHistory = `
             DELETE FROM message_history
             WHERE id IN (
@@ -175,11 +185,12 @@ func (s *server) trimMessageHistory(userID, chatJID string, limit int) error {
             )`
 	}
 
-	// whatsmeow_message_secrets belongs to the whatsmeow internal store (main.db in
-	// SQLite mode), not to the wuzapi users.db. Attempting to delete from it via s.db
-	// always fails with "no such table". Skip the cleanup for SQLite; in Postgres both
-	// wuzapi and whatsmeow share the same database so the DELETE is valid.
-	if s.db.DriverName() == "postgres" {
+	// whatsmeow_message_secrets belongs to the whatsmeow internal store (main.db
+	// in SQLite mode), not to the wuzapi users.db. Attempting to delete from it
+	// via s.db always fails with "no such table". Skip the cleanup for SQLite;
+	// in Postgres both wuzapi and whatsmeow share the same database so the
+	// DELETE is valid.
+	if isPostgres {
 		if _, err := s.db.Exec(querySecrets, userID, chatJID, limit); err != nil {
 			return fmt.Errorf("failed to trim message secrets: %w", err)
 		}

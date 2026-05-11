@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/jmoiron/sqlx"
@@ -826,35 +827,26 @@ func TestGroupList(t *testing.T) {
 	}
 }
 
-// TestTrimMessageHistory_SQLite_NoSecretsTable verifies that trimMessageHistory
-// does not fail when the whatsmeow_message_secrets table is absent from the wuzapi
-// SQLite database (users.db). That table belongs to the whatsmeow internal store
-// (main.db) and is never created by initializeSchema.
-func TestTrimMessageHistory_SQLite_NoSecretsTable(t *testing.T) {
-	s := makeTestServer(t)
-
-	userID := "42"
-	chatJID := "5511999990001@s.whatsapp.net"
-	limit := 3
-
-	// Insert limit+2 messages so the trim has work to do.
-	for i := 0; i < limit+2; i++ {
-		err := s.saveMessageToHistory(
-			userID, chatJID, "sender@s.whatsapp.net",
-			fmt.Sprintf("msg-%d", i),
-			"text", fmt.Sprintf("hello %d", i), "", "", "",
-		)
-		if err != nil {
-			t.Fatalf("saveMessageToHistory: %v", err)
-		}
+// insertHistoryRow writes a row directly into message_history with an explicit
+// timestamp so tests stay deterministic (saveMessageToHistory uses time.Now()
+// which can collide when called in a tight loop).
+func insertHistoryRow(t *testing.T, s *server, userID, chatJID, messageID string, ts time.Time) {
+	t.Helper()
+	_, err := s.db.Exec(
+		`INSERT INTO message_history
+		   (user_id, chat_jid, sender_jid, message_id, timestamp,
+		    message_type, text_content, media_link, quoted_message_id, datajson)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		userID, chatJID, "sender@s.whatsapp.net", messageID, ts,
+		"text", "msg "+messageID, "", "", "",
+	)
+	if err != nil {
+		t.Fatalf("insertHistoryRow(%s): %v", messageID, err)
 	}
+}
 
-	// Must not return an error even though whatsmeow_message_secrets does not exist.
-	if err := s.trimMessageHistory(userID, chatJID, limit); err != nil {
-		t.Fatalf("trimMessageHistory returned unexpected error: %v", err)
-	}
-
-	// Exactly `limit` rows must remain for this (userID, chatJID) pair.
+func countHistory(t *testing.T, s *server, userID, chatJID string) int {
+	t.Helper()
 	var count int
 	row := s.db.QueryRow(
 		`SELECT count(*) FROM message_history WHERE user_id = ? AND chat_jid = ?`,
@@ -863,8 +855,56 @@ func TestTrimMessageHistory_SQLite_NoSecretsTable(t *testing.T) {
 	if err := row.Scan(&count); err != nil {
 		t.Fatalf("count query: %v", err)
 	}
-	if count != limit {
-		t.Errorf("expected %d rows after trim, got %d", limit, count)
+	return count
+}
+
+func listMessageIDs(t *testing.T, s *server, userID, chatJID string) []string {
+	t.Helper()
+	rows, err := s.db.Query(
+		`SELECT message_id FROM message_history
+		 WHERE user_id = ? AND chat_jid = ? ORDER BY timestamp DESC`,
+		userID, chatJID,
+	)
+	if err != nil {
+		t.Fatalf("list query: %v", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var mid string
+		if err := rows.Scan(&mid); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		out = append(out, mid)
+	}
+	return out
+}
+
+// TestTrimMessageHistory_SQLite_NoSecretsTable verifies that trimMessageHistory
+// does not fail when the whatsmeow_message_secrets table is absent from the
+// wuzapi SQLite database (users.db). That table belongs to the whatsmeow
+// internal store (main.db) and is never created by initializeSchema.
+func TestTrimMessageHistory_SQLite_NoSecretsTable(t *testing.T) {
+	s := makeTestServer(t)
+
+	userID := "42"
+	chatJID := "5511999990001@s.whatsapp.net"
+	limit := 3
+
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < limit+2; i++ {
+		insertHistoryRow(t, s, userID, chatJID,
+			fmt.Sprintf("msg-%d", i),
+			base.Add(time.Duration(i)*time.Second),
+		)
+	}
+
+	if err := s.trimMessageHistory(userID, chatJID, limit); err != nil {
+		t.Fatalf("trimMessageHistory returned unexpected error: %v", err)
+	}
+
+	if got := countHistory(t, s, userID, chatJID); got != limit {
+		t.Errorf("expected %d rows after trim, got %d", limit, got)
 	}
 }
 
@@ -877,54 +917,141 @@ func TestTrimMessageHistory_SQLite_KeepsNewest(t *testing.T) {
 	chatJID := "5511888880002@s.whatsapp.net"
 	limit := 2
 
-	// Insert messages in order; the last inserted will have the latest timestamp.
-	ids := []string{"old-1", "old-2", "new-3", "new-4"}
-	for _, id := range ids {
-		err := s.saveMessageToHistory(
-			userID, chatJID, "s@s.whatsapp.net",
-			id, "text", "msg "+id, "", "", "",
-		)
-		if err != nil {
-			t.Fatalf("saveMessageToHistory(%s): %v", id, err)
-		}
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		id      string
+		offsetS int
+	}{
+		{"old-1", 0},
+		{"old-2", 1},
+		{"new-3", 2},
+		{"new-4", 3},
+	}
+	for _, c := range cases {
+		insertHistoryRow(t, s, userID, chatJID, c.id, base.Add(time.Duration(c.offsetS)*time.Second))
 	}
 
 	if err := s.trimMessageHistory(userID, chatJID, limit); err != nil {
 		t.Fatalf("trimMessageHistory: %v", err)
 	}
 
-	rows, err := s.db.Query(
-		`SELECT message_id FROM message_history WHERE user_id = ? AND chat_jid = ? ORDER BY timestamp DESC`,
-		userID, chatJID,
-	)
-	if err != nil {
-		t.Fatalf("query after trim: %v", err)
-	}
-	defer rows.Close()
-
-	var remaining []string
-	for rows.Next() {
-		var mid string
-		if err := rows.Scan(&mid); err != nil {
-			t.Fatalf("scan: %v", err)
-		}
-		remaining = append(remaining, mid)
-	}
-
+	remaining := listMessageIDs(t, s, userID, chatJID)
 	if len(remaining) != limit {
-		t.Errorf("expected %d rows, got %d: %v", limit, len(remaining), remaining)
+		t.Fatalf("expected %d rows, got %d: %v", limit, len(remaining), remaining)
 	}
-	// The two newest IDs should have survived.
+
+	survivors := map[string]bool{}
+	for _, r := range remaining {
+		survivors[r] = true
+	}
 	for _, expected := range []string{"new-3", "new-4"} {
-		found := false
-		for _, r := range remaining {
-			if r == expected {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if !survivors[expected] {
 			t.Errorf("expected message_id %q to survive trim, got %v", expected, remaining)
 		}
+	}
+	for _, gone := range []string{"old-1", "old-2"} {
+		if survivors[gone] {
+			t.Errorf("expected message_id %q to be removed, but it is still present: %v", gone, remaining)
+		}
+	}
+}
+
+// TestTrimMessageHistory_NonPositiveLimit_NoOp guards against the regression
+// where limit<=0 collapses to OFFSET<=0 and wipes the whole chat history.
+// Production callers already guard with `historyLimit > 0`; this test fixes
+// the contract at the function level.
+func TestTrimMessageHistory_NonPositiveLimit_NoOp(t *testing.T) {
+	s := makeTestServer(t)
+
+	userID := "guard-user"
+	chatJID := "guard-chat@s.whatsapp.net"
+
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 5; i++ {
+		insertHistoryRow(t, s, userID, chatJID, fmt.Sprintf("msg-%d", i), base.Add(time.Duration(i)*time.Second))
+	}
+
+	for _, limit := range []int{0, -1, -42} {
+		if err := s.trimMessageHistory(userID, chatJID, limit); err != nil {
+			t.Errorf("trimMessageHistory(limit=%d) returned error: %v", limit, err)
+		}
+		if got := countHistory(t, s, userID, chatJID); got != 5 {
+			t.Errorf("limit=%d: expected 5 rows preserved, got %d", limit, got)
+		}
+	}
+}
+
+// TestTrimMessageHistory_FewerThanLimit_NoOp ensures that calling trim when
+// the chat has fewer rows than the limit does not delete anything.
+func TestTrimMessageHistory_FewerThanLimit_NoOp(t *testing.T) {
+	s := makeTestServer(t)
+
+	userID := "few-user"
+	chatJID := "few-chat@s.whatsapp.net"
+
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 3; i++ {
+		insertHistoryRow(t, s, userID, chatJID, fmt.Sprintf("msg-%d", i), base.Add(time.Duration(i)*time.Second))
+	}
+
+	if err := s.trimMessageHistory(userID, chatJID, 10); err != nil {
+		t.Fatalf("trimMessageHistory: %v", err)
+	}
+	if got := countHistory(t, s, userID, chatJID); got != 3 {
+		t.Errorf("expected 3 rows preserved (limit larger than rowcount), got %d", got)
+	}
+}
+
+// TestTrimMessageHistory_IsolatesChats ensures the trim only touches the
+// targeted (user_id, chat_jid) pair and leaves other chats untouched.
+func TestTrimMessageHistory_IsolatesChats(t *testing.T) {
+	s := makeTestServer(t)
+
+	userID := "shared-user"
+	chatA := "chat-a@s.whatsapp.net"
+	chatB := "chat-b@s.whatsapp.net"
+
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 5; i++ {
+		insertHistoryRow(t, s, userID, chatA, fmt.Sprintf("a-%d", i), base.Add(time.Duration(i)*time.Second))
+		insertHistoryRow(t, s, userID, chatB, fmt.Sprintf("b-%d", i), base.Add(time.Duration(i)*time.Second))
+	}
+
+	if err := s.trimMessageHistory(userID, chatA, 2); err != nil {
+		t.Fatalf("trimMessageHistory: %v", err)
+	}
+
+	if got := countHistory(t, s, userID, chatA); got != 2 {
+		t.Errorf("expected 2 rows on chatA after trim, got %d", got)
+	}
+	if got := countHistory(t, s, userID, chatB); got != 5 {
+		t.Errorf("chatB must be untouched; expected 5 rows, got %d", got)
+	}
+}
+
+// TestTrimMessageHistory_IsolatesUsers ensures the trim only touches the
+// targeted user and leaves the same chat_jid alone for other users.
+func TestTrimMessageHistory_IsolatesUsers(t *testing.T) {
+	s := makeTestServer(t)
+
+	userA := "user-a"
+	userB := "user-b"
+	chatJID := "common@s.whatsapp.net"
+
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 4; i++ {
+		insertHistoryRow(t, s, userA, chatJID, fmt.Sprintf("a-%d", i), base.Add(time.Duration(i)*time.Second))
+		insertHistoryRow(t, s, userB, chatJID, fmt.Sprintf("b-%d", i), base.Add(time.Duration(i)*time.Second))
+	}
+
+	if err := s.trimMessageHistory(userA, chatJID, 1); err != nil {
+		t.Fatalf("trimMessageHistory: %v", err)
+	}
+
+	if got := countHistory(t, s, userA, chatJID); got != 1 {
+		t.Errorf("expected 1 row for userA after trim, got %d", got)
+	}
+	if got := countHistory(t, s, userB, chatJID); got != 4 {
+		t.Errorf("userB must be untouched; expected 4 rows, got %d", got)
 	}
 }
