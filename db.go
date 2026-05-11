@@ -175,8 +175,14 @@ func (s *server) trimMessageHistory(userID, chatJID string, limit int) error {
             )`
 	}
 
-	if _, err := s.db.Exec(querySecrets, userID, chatJID, limit); err != nil {
-		return fmt.Errorf("failed to trim message secrets: %w", err)
+	// whatsmeow_message_secrets belongs to the whatsmeow internal store (main.db in
+	// SQLite mode), not to the wuzapi users.db. Attempting to delete from it via s.db
+	// always fails with "no such table". Skip the cleanup for SQLite; in Postgres both
+	// wuzapi and whatsmeow share the same database so the DELETE is valid.
+	if s.db.DriverName() == "postgres" {
+		if _, err := s.db.Exec(querySecrets, userID, chatJID, limit); err != nil {
+			return fmt.Errorf("failed to trim message secrets: %w", err)
+		}
 	}
 
 	if _, err := s.db.Exec(queryHistory, userID, chatJID, limit); err != nil {
