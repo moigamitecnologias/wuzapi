@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -121,13 +122,40 @@ type HistoryMessage struct {
 }
 
 func (s *server) saveMessageToHistory(userID, chatJID, senderJID, messageID, messageType, textContent, mediaLink, quotedMessageID, dataJson string) error {
+	// Use the REAL message timestamp instead of insertion time. The
+	// `dataJson` blob this function already receives is the marshalled
+	// event (live `*events.Message` or the reconstructed HistorySync
+	// message event), both of which carry `Info.Timestamp`. Inserting
+	// `time.Now()` (the previous behaviour) clustered every backfilled
+	// message at sync time, so `ORDER BY timestamp DESC` no longer
+	// reflected the conversation's real chronology. Outgoing rows pass
+	// an empty `dataJson`, so they keep `time.Now()` which equals the
+	// actual send time — also correct.
+	msgTime := time.Now()
+	if dataJson != "" {
+		var blob struct {
+			Info struct {
+				Timestamp time.Time `json:"Timestamp"`
+			} `json:"Info"`
+		}
+		if err := json.Unmarshal([]byte(dataJson), &blob); err == nil && !blob.Info.Timestamp.IsZero() {
+			msgTime = blob.Info.Timestamp
+		}
+	}
+	// The `timestamp` column is a naive `TIMESTAMP` (no time zone). If we
+	// insert a -03:00 time, the offset is dropped and the local wall
+	// clock gets stored as if it were UTC (the "3h off" bug). Normalise
+	// to UTC so the stored wall clock IS the UTC instant and reads back
+	// correctly downstream.
+	msgTime = msgTime.UTC()
+
 	query := `INSERT INTO message_history (user_id, chat_jid, sender_jid, message_id, timestamp, message_type, text_content, media_link, quoted_message_id, datajson)
               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`
 	if s.db.DriverName() == "sqlite" {
 		query = `INSERT INTO message_history (user_id, chat_jid, sender_jid, message_id, timestamp, message_type, text_content, media_link, quoted_message_id, datajson)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	}
-	_, err := s.db.Exec(query, userID, chatJID, senderJID, messageID, time.Now(), messageType, textContent, mediaLink, quotedMessageID, dataJson)
+	_, err := s.db.Exec(query, userID, chatJID, senderJID, messageID, msgTime, messageType, textContent, mediaLink, quotedMessageID, dataJson)
 	if err != nil {
 		return fmt.Errorf("failed to save message to history: %w", err)
 	}
