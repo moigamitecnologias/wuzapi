@@ -751,8 +751,14 @@ func fetchOpenGraphImage(ctx context.Context, pageURL *url.URL, imageURLStr stri
 	return buf.Bytes()
 }
 
-func runFFmpegConversion(input []byte, inputExt string, ffmpegArgs func(inPath, outPath string) []string, errMsg string) ([]byte, error) {
-	inFile, err := os.CreateTemp("", "sticker-input-*"+inputExt)
+func runFFmpegConversion(
+	input []byte,
+	inputExt string,
+	outputExt string,
+	ffmpegArgs func(inPath, outPath string) []string,
+	errMsg string,
+) ([]byte, error) {
+	inFile, err := os.CreateTemp("", "ffmpeg-input-*"+inputExt)
 	if err != nil {
 		return nil, err
 	}
@@ -763,7 +769,7 @@ func runFFmpegConversion(input []byte, inputExt string, ffmpegArgs func(inPath, 
 		return nil, err
 	}
 
-	outFile, err := os.CreateTemp("", "sticker-output-*.webp")
+	outFile, err := os.CreateTemp("", "ffmpeg-output-*"+outputExt)
 	if err != nil {
 		return nil, err
 	}
@@ -787,7 +793,7 @@ func runFFmpegConversion(input []byte, inputExt string, ffmpegArgs func(inPath, 
 }
 
 func convertVideoStickerToWebP(input []byte) ([]byte, error) {
-	return runFFmpegConversion(input, ".mp4", func(inPath, outPath string) []string {
+	return runFFmpegConversion(input, ".mp4", ".webp", func(inPath, outPath string) []string {
 		return []string{
 			"-y",
 			"-t", "10",
@@ -805,7 +811,7 @@ func convertVideoStickerToWebP(input []byte) ([]byte, error) {
 }
 
 func convertImageToWebP(input []byte) ([]byte, error) {
-	return runFFmpegConversion(input, ".img", func(inPath, outPath string) []string {
+	return runFFmpegConversion(input, ".img", ".webp", func(inPath, outPath string) []string {
 		return []string{
 			"-y",
 			"-i", inPath,
@@ -815,6 +821,22 @@ func convertImageToWebP(input []byte) ([]byte, error) {
 			outPath,
 		}
 	}, "ffmpeg failed converting image sticker")
+}
+
+// convertWebmToOggOpus re-encodes browser MediaRecorder output for WhatsApp audio.
+// WA accepts OGG/Opus (see wuzapi API.md); WebM uploads get a server ack but no delivery.
+func convertWebmToOggOpus(input []byte) ([]byte, error) {
+	return runFFmpegConversion(input, ".webm", ".ogg", func(inPath, outPath string) []string {
+		return []string{
+			"-y",
+			"-i", inPath,
+			"-c:a", "libopus",
+			"-b:a", "32k",
+			"-vbr", "on",
+			"-compression_level", "10",
+			outPath,
+		}
+	}, "ffmpeg failed converting webm audio to ogg opus")
 }
 
 func processStickerData(stickerData string, mimeOverride string, packID, packName, packPublisher string, emojis []string) ([]byte, string, error) {

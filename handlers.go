@@ -1086,6 +1086,16 @@ func (s *server) SendAudio() http.HandlerFunc {
 			ptt = *t.PTT
 		}
 
+		if strings.Contains(strings.ToLower(detectedMime), "webm") {
+			converted, err := convertWebmToOggOpus(filedata)
+			if err != nil {
+				s.Respond(w, r, http.StatusBadRequest, errors.New(fmt.Sprintf("could not convert webm audio: %v", err)))
+				return
+			}
+			filedata = converted
+			detectedMime = "audio/ogg; codecs=opus"
+		}
+
 		var mime string
 		switch {
 		case t.MimeType != "":
