@@ -5498,14 +5498,15 @@ func (s *server) EditUser() http.HandlerFunc {
 
 		// Parse the request body
 		var user struct {
-			Name        string       `json:"name,omitempty"`
-			Token       string       `json:"token,omitempty"`
-			Webhook     string       `json:"webhook,omitempty"`
-			Expiration  int          `json:"expiration,omitempty"`
-			Events      string       `json:"events,omitempty"`
-			ProxyConfig *ProxyConfig `json:"proxyConfig,omitempty"`
-			S3Config    *S3Config    `json:"s3Config,omitempty"`
-			History     int          `json:"history,omitempty"`
+			Name               string       `json:"name,omitempty"`
+			Token              string       `json:"token,omitempty"`
+			Webhook            string       `json:"webhook,omitempty"`
+			Expiration         int          `json:"expiration,omitempty"`
+			Events             string       `json:"events,omitempty"`
+			ProxyConfig        *ProxyConfig `json:"proxyConfig,omitempty"`
+			S3Config           *S3Config    `json:"s3Config,omitempty"`
+			History            int          `json:"history,omitempty"`
+			DaysToSyncHistory  int          `json:"days_to_sync_history,omitempty"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&user); err != nil {
@@ -5584,6 +5585,7 @@ func (s *server) EditUser() http.HandlerFunc {
 		addField("expiration", user.Expiration, user.Expiration != 0)
 		addField("events", user.Events, user.Events != "")
 		addField("history", user.History, user.History != 0)
+		addField("days_to_sync_history", user.DaysToSyncHistory, user.DaysToSyncHistory != 0)
 
 		// Handle proxy config
 		if user.ProxyConfig != nil {
