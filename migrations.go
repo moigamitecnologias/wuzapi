@@ -75,7 +75,27 @@ var migrations = []Migration{
 		Name:  "add_whatsmeow_message_secrets_message_id_idx",
 		UpSQL: addWhatsmeowMessageSecretsMessageIDIndexSQL,
 	},
+	{
+		ID:    10,
+		Name:  "add_days_to_sync_history",
+		UpSQL: addDaysToSyncHistorySQL,
+	},
 }
+
+const addDaysToSyncHistorySQL = `
+-- PostgreSQL version
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'users' AND column_name = 'days_to_sync_history'
+    ) THEN
+        ALTER TABLE users ADD COLUMN days_to_sync_history INTEGER DEFAULT 0;
+    END IF;
+END $$;
+
+-- SQLite version (handled in code)
+`
 
 const changeIDToStringSQL = `
 -- Migration to change ID from integer to random string
@@ -453,6 +473,12 @@ func applyMigration(db *sqlx.DB, migration Migration) error {
 	} else if migration.ID == 9 {
 		if db.DriverName() == "sqlite" {
 			err = nil
+		} else {
+			_, err = tx.Exec(migration.UpSQL)
+		}
+	} else if migration.ID == 10 {
+		if db.DriverName() == "sqlite" {
+			err = addColumnIfNotExistsSQLite(tx, "users", "days_to_sync_history", "INTEGER DEFAULT 0")
 		} else {
 			_, err = tx.Exec(migration.UpSQL)
 		}

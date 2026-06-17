@@ -5302,15 +5302,16 @@ func (s *server) AddUser() http.HandlerFunc {
 
 		// Parse the request body
 		var user struct {
-			Name        string       `json:"name"`
-			Token       string       `json:"token"`
-			Webhook     string       `json:"webhook,omitempty"`
-			Expiration  int          `json:"expiration,omitempty"`
-			Events      string       `json:"events,omitempty"`
-			ProxyConfig *ProxyConfig `json:"proxyConfig,omitempty"`
-			S3Config    *S3Config    `json:"s3Config,omitempty"`
-			HmacKey     string       `json:"hmacKey,omitempty"`
-			History     int          `json:"history,omitempty"`
+			Name              string       `json:"name"`
+			Token             string       `json:"token"`
+			Webhook           string       `json:"webhook,omitempty"`
+			Expiration        int          `json:"expiration,omitempty"`
+			Events            string       `json:"events,omitempty"`
+			ProxyConfig       *ProxyConfig `json:"proxyConfig,omitempty"`
+			S3Config          *S3Config    `json:"s3Config,omitempty"`
+			HmacKey           string       `json:"hmacKey,omitempty"`
+			History           int          `json:"history,omitempty"`
+			DaysToSyncHistory int          `json:"days_to_sync_history,omitempty"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&user); err != nil {
@@ -5417,9 +5418,9 @@ func (s *server) AddUser() http.HandlerFunc {
 
 		// Insert user with all proxy, S3 and HMAC fields
 		if _, err = s.db.Exec(
-			"INSERT INTO users (id, name, token, webhook, expiration, events, jid, qrcode, proxy_url, s3_enabled, s3_endpoint, s3_region, s3_bucket, s3_access_key, s3_secret_key, s3_path_style, s3_public_url, media_delivery, s3_retention_days, hmac_key, history) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)",
+			"INSERT INTO users (id, name, token, webhook, expiration, events, jid, qrcode, proxy_url, s3_enabled, s3_endpoint, s3_region, s3_bucket, s3_access_key, s3_secret_key, s3_path_style, s3_public_url, media_delivery, s3_retention_days, hmac_key, history, days_to_sync_history) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)",
 			id, user.Name, user.Token, user.Webhook, user.Expiration, user.Events, "", "", user.ProxyConfig.ProxyURL,
-			user.S3Config.Enabled, user.S3Config.Endpoint, user.S3Config.Region, user.S3Config.Bucket, user.S3Config.AccessKey, user.S3Config.SecretKey, user.S3Config.PathStyle, user.S3Config.PublicURL, user.S3Config.MediaDelivery, user.S3Config.RetentionDays, encryptedHmacKey, user.History,
+			user.S3Config.Enabled, user.S3Config.Endpoint, user.S3Config.Region, user.S3Config.Bucket, user.S3Config.AccessKey, user.S3Config.SecretKey, user.S3Config.PathStyle, user.S3Config.PublicURL, user.S3Config.MediaDelivery, user.S3Config.RetentionDays, encryptedHmacKey, user.History, user.DaysToSyncHistory,
 		); err != nil {
 			log.Error().Str("error", fmt.Sprintf("%v", err)).Msg("admin DB error")
 			s.respondWithJSON(w, http.StatusInternalServerError, map[string]interface{}{
@@ -5498,15 +5499,15 @@ func (s *server) EditUser() http.HandlerFunc {
 
 		// Parse the request body
 		var user struct {
-			Name               string       `json:"name,omitempty"`
-			Token              string       `json:"token,omitempty"`
-			Webhook            string       `json:"webhook,omitempty"`
-			Expiration         int          `json:"expiration,omitempty"`
-			Events             string       `json:"events,omitempty"`
-			ProxyConfig        *ProxyConfig `json:"proxyConfig,omitempty"`
-			S3Config           *S3Config    `json:"s3Config,omitempty"`
-			History            int          `json:"history,omitempty"`
-			DaysToSyncHistory  int          `json:"days_to_sync_history,omitempty"`
+			Name              string       `json:"name,omitempty"`
+			Token             string       `json:"token,omitempty"`
+			Webhook           string       `json:"webhook,omitempty"`
+			Expiration        int          `json:"expiration,omitempty"`
+			Events            string       `json:"events,omitempty"`
+			ProxyConfig       *ProxyConfig `json:"proxyConfig,omitempty"`
+			S3Config          *S3Config    `json:"s3Config,omitempty"`
+			History           int          `json:"history,omitempty"`
+			DaysToSyncHistory int          `json:"days_to_sync_history,omitempty"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&user); err != nil {
@@ -6529,6 +6530,99 @@ func (s *server) GetHistory() http.HandlerFunc {
 		} else {
 			s.Respond(w, r, http.StatusOK, string(responseJson))
 		}
+	}
+}
+
+// SyncUserHistory triggers WhatsApp history sync for all 1:1 contacts of a user.
+// Admin-only: POST /admin/users/{id}/sync-history  body: {"days": 30, "max_chats": 500}
+func (s *server) SyncUserHistory() http.HandlerFunc {
+	type syncRequest struct {
+		Days     int `json:"days"`
+		MaxChats int `json:"max_chats"`
+	}
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		vars := mux.Vars(r)
+		userID := vars["id"]
+		if userID == "" {
+			s.respondWithJSON(w, http.StatusBadRequest, map[string]interface{}{
+				"code": http.StatusBadRequest, "error": "missing user id", "success": false,
+			})
+			return
+		}
+
+		days := 30
+		maxChats := 500
+		if r.Body != nil {
+			var req syncRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
+				if req.Days > 0 {
+					days = req.Days
+				}
+				if req.MaxChats > 0 {
+					maxChats = req.MaxChats
+				}
+			}
+		}
+
+		if clientManager.GetWhatsmeowClient(userID) == nil {
+			s.respondWithJSON(w, http.StatusConflict, map[string]interface{}{
+				"code": http.StatusConflict, "error": "no active session", "success": false,
+			})
+			return
+		}
+
+		count := days * 15
+		if count > 500 {
+			count = 500
+		}
+		if count < 50 {
+			count = 50
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+
+		contacts, err := clientManager.GetWhatsmeowClient(userID).Store.Contacts.GetAllContacts(ctx)
+		if err != nil {
+			s.respondWithJSON(w, http.StatusInternalServerError, map[string]interface{}{
+				"code": http.StatusInternalServerError, "error": "failed to list contacts", "success": false,
+			})
+			return
+		}
+
+		synced := 0
+		failed := 0
+		seen := 0
+		for jid := range contacts {
+			if jid.Server == types.GroupServer || jid.Server == types.BroadcastServer {
+				continue
+			}
+			if seen >= maxChats {
+				break
+			}
+			seen++
+			if err := s.syncHistoryForChat(ctx, userID, jid, count); err != nil {
+				failed++
+				log.Warn().Err(err).Str("userID", userID).Str("chatJID", jid.String()).Msg("sync-history chat failed")
+			} else {
+				synced++
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+
+		s.respondWithJSON(w, http.StatusOK, map[string]interface{}{
+			"code":    http.StatusOK,
+			"success": true,
+			"data": map[string]interface{}{
+				"chats_synced": synced,
+				"chats_failed": failed,
+				"days":         days,
+				"count":        count,
+			},
+		})
 	}
 }
 
