@@ -790,9 +790,15 @@ func (s *server) GetStatus() http.HandlerFunc {
 		}
 		hmacConfigured := len(hmacKey) > 0
 
+		pushName := ""
+		if client := clientManager.GetWhatsmeowClient(txtid); client != nil && client.Store != nil {
+			pushName = strings.TrimSpace(client.Store.PushName)
+		}
+
 		response := map[string]interface{}{
 			"id":              txtid,
 			"name":            userInfo.Get("Name"),
+			"pushName":        pushName,
 			"connected":       isConnected,
 			"loggedIn":        isLoggedIn,
 			"token":           userInfo.Get("Token"),

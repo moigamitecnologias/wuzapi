@@ -731,6 +731,9 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 		}
 	case *events.PairSuccess:
 		log.Info().Str("userid", mycli.userID).Str("token", mycli.token).Str("ID", evt.ID.String()).Str("BusinessName", evt.BusinessName).Str("Platform", evt.Platform).Msg("QR Pair Success")
+		if bn := strings.TrimSpace(evt.BusinessName); bn != "" {
+			postmap["businessName"] = bn
+		}
 		jid := evt.ID
 		sqlStmt := `UPDATE users SET jid=$1 WHERE id=$2`
 		_, err := mycli.db.Exec(sqlStmt, jid, mycli.userID)
@@ -1592,6 +1595,20 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 	}
 
 	if dowebhook == 1 {
+		if eventType, ok := postmap["type"].(string); ok && (eventType == "Connected" || eventType == "PairSuccess") {
+			attachAccountPushName(mycli, postmap)
+		}
 		sendEventWithWebHook(mycli, postmap, path)
+	}
+}
+
+// attachAccountPushName adds the paired account's WhatsApp push name to lifecycle
+// webhooks so consumers can persist the human display name without scraping messages.
+func attachAccountPushName(mycli *MyClient, postmap map[string]interface{}) {
+	if mycli.WAClient == nil || mycli.WAClient.Store == nil {
+		return
+	}
+	if pn := strings.TrimSpace(mycli.WAClient.Store.PushName); pn != "" {
+		postmap["pushName"] = pn
 	}
 }
