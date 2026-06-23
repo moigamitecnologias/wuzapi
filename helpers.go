@@ -1050,7 +1050,7 @@ func assembleWebP(chunks [][]byte, exif []byte) []byte {
 func pairPhoneClientDisplayName() string {
 	name := strings.TrimSpace(*osName)
 	if name == "" {
-		return "meuagente.co"
+		return "meucliente.co"
 	}
 	return name
 }
