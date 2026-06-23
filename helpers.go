@@ -1045,6 +1045,16 @@ func assembleWebP(chunks [][]byte, exif []byte) []byte {
 	return b
 }
 
+// pairPhoneClientDisplayName is the label WhatsApp shows under Linked Devices
+// for phone-code pairing. Uses SESSION_DEVICE_NAME / --osname (same as QR).
+func pairPhoneClientDisplayName() string {
+	name := strings.TrimSpace(*osName)
+	if name == "" {
+		return "meuagente.co"
+	}
+	return name
+}
+
 func writeChunk(buf *bytes.Buffer, tag string, data []byte) {
 	buf.WriteString(tag)
 	sz := make([]byte, 4)
