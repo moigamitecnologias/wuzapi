@@ -1045,14 +1045,25 @@ func assembleWebP(chunks [][]byte, exif []byte) []byte {
 	return b
 }
 
-// pairPhoneClientDisplayName is the label WhatsApp shows under Linked Devices
-// for phone-code pairing. Uses SESSION_DEVICE_NAME / --osname (same as QR).
-func pairPhoneClientDisplayName() string {
-	name := strings.TrimSpace(*osName)
-	if name == "" {
-		return "meucliente.co"
+const defaultPairPhoneClientDisplayName = "Chrome (Linux)"
+
+// WhatsApp validates companion_platform_display on /session/pairphone and
+// rejects values that are not "Browser (OS)" with IQ 400 bad-request.
+var pairPhoneBrowserOSPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*\s+\([^)]+\)$`)
+
+func pairPhoneDisplayNameFromOSName(osName string) string {
+	name := strings.TrimSpace(osName)
+	if name != "" && pairPhoneBrowserOSPattern.MatchString(name) {
+		return name
 	}
-	return name
+	return defaultPairPhoneClientDisplayName
+}
+
+// pairPhoneClientDisplayName is the label WhatsApp shows under Linked Devices
+// for phone-code pairing. SESSION_DEVICE_NAME / --osname stays as branding for
+// QR (DeviceProps.Os); pairphone uses a WhatsApp-valid Browser (OS) string.
+func pairPhoneClientDisplayName() string {
+	return pairPhoneDisplayNameFromOSName(*osName)
 }
 
 func writeChunk(buf *bytes.Buffer, tag string, data []byte) {
