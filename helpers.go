@@ -40,6 +40,7 @@ import (
 	"github.com/nfnt/resize"
 	"github.com/rs/zerolog/log"
 	"github.com/vincent-petithory/dataurl"
+	"go.mau.fi/whatsmeow/store"
 )
 
 const (
@@ -1045,31 +1046,74 @@ func assembleWebP(chunks [][]byte, exif []byte) []byte {
 	return b
 }
 
-const defaultPairPhoneClientDisplayName = "Chrome (Linux)"
+const defaultPairPhoneClientDisplayName = "Chrome (Mac OS)"
 
 // WhatsApp validates companion_platform_display on /session/pairphone and
 // rejects values that are not "Browser (OS)" with IQ 400 bad-request.
 var pairPhoneBrowserOSPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*\s+\([^)]+\)$`)
 
+var devicePropsMu sync.Mutex
+
 func pairPhoneDisplayNameFromOSName(osName string) string {
 	name := strings.TrimSpace(osName)
 	if name != "" && pairPhoneBrowserOSPattern.MatchString(name) {
-		return name
+		return canonicalPairPhoneDisplayName(name)
 	}
 	return defaultPairPhoneClientDisplayName
 }
 
-// devicePropsOsForWhatsApp shapes SESSION_DEVICE_NAME for store.DeviceProps.Os.
-// WhatsApp pairphone rejects non-canonical OS labels inside Browser (OS).
+func canonicalPairPhoneDisplayName(name string) string {
+	lower := strings.ToLower(name)
+	switch {
+	case strings.Contains(lower, "(linux)"),
+		strings.Contains(lower, "(ubuntu)"),
+		strings.Contains(lower, "(windows)"),
+		strings.Contains(lower, "(mac os)"),
+		strings.Contains(lower, "(macos)"):
+		return defaultPairPhoneClientDisplayName
+	default:
+		return defaultPairPhoneClientDisplayName
+	}
+}
+
+// devicePropsOsForWhatsApp shapes store.DeviceProps.Os for companion registration.
+// Must match companion_platform_display on pairphone or WhatsApp returns 400.
 func devicePropsOsForWhatsApp(osName string) string {
 	return pairPhoneDisplayNameFromOSName(osName)
 }
 
-// pairPhoneClientDisplayName is the label WhatsApp shows under Linked Devices
-// for phone-code pairing. SESSION_DEVICE_NAME / --osname stays as branding for
-// QR (DeviceProps.Os); pairphone uses a WhatsApp-valid Browser (OS) string.
 func pairPhoneClientDisplayName() string {
-	return pairPhoneDisplayNameFromOSName(*osName)
+	return defaultPairPhoneClientDisplayName
+}
+
+func applySessionDeviceProps() {
+	devicePropsMu.Lock()
+	defer devicePropsMu.Unlock()
+	osLabel := devicePropsOsForWhatsApp(*osName)
+	store.SetOSInfo(osLabel, [3]uint32{0, 1, 0})
+	store.DeviceProps.PlatformType = getPlatformTypeEnum(*platformType)
+}
+
+func waitForPairPhoneReady(mycli *MyClient, timeout time.Duration) bool {
+	if mycli == nil || mycli.pairPhoneReady == nil {
+		return true
+	}
+	select {
+	case <-mycli.pairPhoneReady:
+		return true
+	case <-time.After(timeout):
+		return mycli.WAClient != nil && mycli.WAClient.IsConnected()
+	}
+}
+
+func markPairPhoneReady(mycli *MyClient) {
+	if mycli == nil || mycli.pairPhoneReady == nil {
+		return
+	}
+	select {
+	case mycli.pairPhoneReady <- struct{}{}:
+	default:
+	}
 }
 
 func writeChunk(buf *bytes.Buffer, tag string, data []byte) {

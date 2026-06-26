@@ -694,14 +694,23 @@ func (s *server) PairPhone() http.HandlerFunc {
 			return
 		}
 
-		isLoggedIn := clientManager.GetWhatsmeowClient(txtid).IsLoggedIn()
+		client := clientManager.GetWhatsmeowClient(txtid)
+		isLoggedIn := client.IsLoggedIn()
 		if isLoggedIn {
 			log.Error().Msg(fmt.Sprintf("%s", "already paired"))
 			s.Respond(w, r, http.StatusBadRequest, errors.New("already paired"))
 			return
 		}
 
-		linkingCode, err := clientManager.GetWhatsmeowClient(txtid).PairPhone(context.Background(), t.Phone, true, whatsmeow.PairClientChrome, pairPhoneClientDisplayName())
+		mycli := clientManager.GetMyClient(txtid)
+		if !waitForPairPhoneReady(mycli, 25*time.Second) {
+			s.Respond(w, r, http.StatusBadRequest, errors.New("websocket not connected"))
+			return
+		}
+
+		displayName := pairPhoneClientDisplayName()
+		log.Info().Str("userid", txtid).Str("displayName", displayName).Msg("pairphone request")
+		linkingCode, err := client.PairPhone(context.Background(), t.Phone, false, whatsmeow.PairClientChrome, displayName)
 		if err != nil {
 			log.Error().Msg(fmt.Sprintf("%s", err))
 			s.Respond(w, r, http.StatusBadRequest, err)

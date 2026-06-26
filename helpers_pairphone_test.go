@@ -8,9 +8,10 @@ func TestDevicePropsOsForWhatsApp(t *testing.T) {
 		in   string
 		want string
 	}{
-		{"meucliente.co", "Chrome (Linux)"},
-		{"", "Chrome (Linux)"},
-		{"Chrome (Linux)", "Chrome (Linux)"},
+		{"meucliente.co", "Chrome (Mac OS)"},
+		{"", "Chrome (Mac OS)"},
+		{"Chrome (Linux)", "Chrome (Mac OS)"},
+		{"Firefox (Windows)", "Chrome (Mac OS)"},
 	}
 	for _, tc := range cases {
 		if got := devicePropsOsForWhatsApp(tc.in); got != tc.want {
@@ -25,17 +26,24 @@ func TestPairPhoneDisplayNameFromOSName(t *testing.T) {
 		in   string
 		want string
 	}{
-		{"meucliente.co", "Chrome (Linux)"},
-		{"meuagente.co", "Chrome (Linux)"},
-		{"", "Chrome (Linux)"},
-		{"   ", "Chrome (Linux)"},
-		{"Chrome (Linux)", "Chrome (Linux)"},
-		{"Firefox (Windows)", "Firefox (Windows)"},
-		{"  Chrome (macOS)  ", "Chrome (macOS)"},
+		{"meucliente.co", "Chrome (Mac OS)"},
+		{"meuagente.co", "Chrome (Mac OS)"},
+		{"", "Chrome (Mac OS)"},
+		{"   ", "Chrome (Mac OS)"},
+		{"Chrome (Linux)", "Chrome (Mac OS)"},
+		{"Firefox (Windows)", "Chrome (Mac OS)"},
+		{"  Chrome (macOS)  ", "Chrome (Mac OS)"},
 	}
 	for _, tc := range cases {
 		if got := pairPhoneDisplayNameFromOSName(tc.in); got != tc.want {
 			t.Errorf("pairPhoneDisplayNameFromOSName(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+func TestPairPhoneClientDisplayName(t *testing.T) {
+	t.Parallel()
+	if got := pairPhoneClientDisplayName(); got != "Chrome (Mac OS)" {
+		t.Errorf("pairPhoneClientDisplayName() = %q, want Chrome (Mac OS)", got)
 	}
 }

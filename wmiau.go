@@ -42,6 +42,7 @@ type MyClient struct {
 	subscriptions  []string
 	db             *sqlx.DB
 	s              *server
+	pairPhoneReady chan struct{}
 }
 
 // safeGo runs fn in a new goroutine with a defer recover so a panic inside
@@ -445,11 +446,17 @@ func (s *server) startClient(userID string, textjid string, token string, subscr
 	// Now we can use the client with the manager
 	clientManager.SetWhatsmeowClient(userID, client)
 
-	store.DeviceProps.PlatformType = getPlatformTypeEnum(*platformType)
-	osLabel := devicePropsOsForWhatsApp(*osName)
-	store.DeviceProps.Os = &osLabel
+	applySessionDeviceProps()
 
-	mycli := MyClient{client, 1, userID, token, subscriptions, s.db, s}
+	mycli := MyClient{
+		WAClient:       client,
+		userID:         userID,
+		token:          token,
+		subscriptions:  subscriptions,
+		db:             s.db,
+		s:              s,
+		pairPhoneReady: make(chan struct{}, 1),
+	}
 	mycli.eventHandlerID = mycli.WAClient.AddEventHandler(mycli.myEventHandler)
 
 	// Store the MyClient in clientManager
@@ -523,6 +530,7 @@ func (s *server) startClient(userID string, textjid string, token string, subscr
 
 			for evt := range qrChan {
 				if evt.Event == "code" {
+					markPairPhoneReady(&mycli)
 					// Display QR code in terminal (useful for testing/developing)
 					// Skip in stdio mode to avoid breaking JSON-RPC
 					if *logType != "json" && s.mode != Stdio {
