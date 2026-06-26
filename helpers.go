@@ -1060,16 +1060,9 @@ func pairPhoneDisplayNameFromOSName(osName string) string {
 }
 
 // devicePropsOsForWhatsApp shapes SESSION_DEVICE_NAME for store.DeviceProps.Os.
-// WhatsApp rejects pairphone when Os is a bare brand string like "meucliente.co".
+// WhatsApp pairphone rejects non-canonical OS labels inside Browser (OS).
 func devicePropsOsForWhatsApp(osName string) string {
-	name := strings.TrimSpace(osName)
-	if name != "" && pairPhoneBrowserOSPattern.MatchString(name) {
-		return name
-	}
-	if name != "" {
-		return "Chrome (" + name + ")"
-	}
-	return defaultPairPhoneClientDisplayName
+	return pairPhoneDisplayNameFromOSName(osName)
 }
 
 // pairPhoneClientDisplayName is the label WhatsApp shows under Linked Devices

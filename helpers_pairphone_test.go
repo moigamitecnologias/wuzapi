@@ -8,7 +8,7 @@ func TestDevicePropsOsForWhatsApp(t *testing.T) {
 		in   string
 		want string
 	}{
-		{"meucliente.co", "Chrome (meucliente.co)"},
+		{"meucliente.co", "Chrome (Linux)"},
 		{"", "Chrome (Linux)"},
 		{"Chrome (Linux)", "Chrome (Linux)"},
 	}
