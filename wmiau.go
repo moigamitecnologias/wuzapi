@@ -446,7 +446,8 @@ func (s *server) startClient(userID string, textjid string, token string, subscr
 	clientManager.SetWhatsmeowClient(userID, client)
 
 	store.DeviceProps.PlatformType = getPlatformTypeEnum(*platformType)
-	store.DeviceProps.Os = osName
+	osLabel := devicePropsOsForWhatsApp(*osName)
+	store.DeviceProps.Os = &osLabel
 
 	mycli := MyClient{client, 1, userID, token, subscriptions, s.db, s}
 	mycli.eventHandlerID = mycli.WAClient.AddEventHandler(mycli.myEventHandler)
